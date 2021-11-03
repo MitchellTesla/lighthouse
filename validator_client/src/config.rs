@@ -35,6 +35,8 @@ pub struct Config {
     pub disable_auto_discover: bool,
     /// If true, re-register existing validators in definitions.yml for slashing protection.
     pub init_slashing_protection: bool,
+    /// If true, use longer timeouts for requests made to the beacon node.
+    pub use_long_timeouts: bool,
     /// Graffiti to be inserted everytime we create a block.
     pub graffiti: Option<Graffiti>,
     /// Graffiti file to load per validator graffitis.
@@ -45,6 +47,12 @@ pub struct Config {
     pub http_metrics: http_metrics::Config,
     /// Configuration for sending metrics to a remote explorer endpoint.
     pub monitoring_api: Option<monitoring_api::Config>,
+    /// If true, enable functionality that monitors the network for attestations or proposals from
+    /// any of the validators managed by this client before starting up.
+    pub enable_doppelganger_protection: bool,
+    /// A list of custom certificates that the validator client will additionally use when
+    /// connecting to a beacon node over SSL/TLS.
+    pub beacon_nodes_tls_certs: Option<Vec<PathBuf>>,
 }
 
 impl Default for Config {
@@ -68,11 +76,14 @@ impl Default for Config {
             allow_unsynced_beacon_node: false,
             disable_auto_discover: false,
             init_slashing_protection: false,
+            use_long_timeouts: false,
             graffiti: None,
             graffiti_file: None,
             http_api: <_>::default(),
             http_metrics: <_>::default(),
             monitoring_api: None,
+            enable_doppelganger_protection: false,
+            beacon_nodes_tls_certs: None,
         }
     }
 }
@@ -156,6 +167,7 @@ impl Config {
         config.allow_unsynced_beacon_node = cli_args.is_present("allow-unsynced");
         config.disable_auto_discover = cli_args.is_present("disable-auto-discover");
         config.init_slashing_protection = cli_args.is_present("init-slashing-protection");
+        config.use_long_timeouts = cli_args.is_present("use-long-timeouts");
 
         if let Some(graffiti_file_path) = cli_args.value_of("graffiti-file") {
             let mut graffiti_file = GraffitiFile::new(graffiti_file_path.into());
@@ -179,10 +191,14 @@ impl Config {
                 // Copy the provided bytes over.
                 //
                 // Panic-free because `graffiti_bytes.len()` <= `GRAFFITI_BYTES_LEN`.
-                graffiti[..graffiti_bytes.len()].copy_from_slice(&graffiti_bytes);
+                graffiti[..graffiti_bytes.len()].copy_from_slice(graffiti_bytes);
 
                 config.graffiti = Some(graffiti.into());
             }
+        }
+
+        if let Some(tls_certs) = parse_optional::<String>(cli_args, "beacon-nodes-tls-certs")? {
+            config.beacon_nodes_tls_certs = Some(tls_certs.split(',').map(PathBuf::from).collect());
         }
 
         /*
@@ -191,6 +207,19 @@ impl Config {
 
         if cli_args.is_present("http") {
             config.http_api.enabled = true;
+        }
+
+        if let Some(address) = cli_args.value_of("http-address") {
+            if cli_args.is_present("unencrypted-http-transport") {
+                config.http_api.listen_addr = address
+                    .parse::<Ipv4Addr>()
+                    .map_err(|_| "http-address is not a valid IPv4 address.")?;
+            } else {
+                return Err(
+                    "While using `--http-address`, you must also use `--unencrypted-http-transport`."
+                        .to_string(),
+                );
+            }
         }
 
         if let Some(port) = cli_args.value_of("http-port") {
@@ -245,6 +274,10 @@ impl Config {
                 freezer_db_path: None,
                 monitoring_endpoint: monitoring_endpoint.to_string(),
             });
+        }
+
+        if cli_args.is_present("enable-doppelganger-protection") {
+            config.enable_doppelganger_protection = true;
         }
 
         Ok(config)

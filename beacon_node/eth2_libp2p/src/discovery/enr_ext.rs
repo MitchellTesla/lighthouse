@@ -88,14 +88,14 @@ impl EnrExt for Enr {
             if let Some(udp) = self.udp() {
                 let mut multiaddr: Multiaddr = ip.into();
                 multiaddr.push(Protocol::Udp(udp));
-                multiaddr.push(Protocol::P2p(peer_id.clone().into()));
+                multiaddr.push(Protocol::P2p(peer_id.into()));
                 multiaddrs.push(multiaddr);
             }
 
             if let Some(tcp) = self.tcp() {
                 let mut multiaddr: Multiaddr = ip.into();
                 multiaddr.push(Protocol::Tcp(tcp));
-                multiaddr.push(Protocol::P2p(peer_id.clone().into()));
+                multiaddr.push(Protocol::P2p(peer_id.into()));
                 multiaddrs.push(multiaddr);
             }
         }
@@ -103,7 +103,7 @@ impl EnrExt for Enr {
             if let Some(udp6) = self.udp6() {
                 let mut multiaddr: Multiaddr = ip6.into();
                 multiaddr.push(Protocol::Udp(udp6));
-                multiaddr.push(Protocol::P2p(peer_id.clone().into()));
+                multiaddr.push(Protocol::P2p(peer_id.into()));
                 multiaddrs.push(multiaddr);
             }
 
@@ -128,7 +128,7 @@ impl EnrExt for Enr {
             if let Some(tcp) = self.tcp() {
                 let mut multiaddr: Multiaddr = ip.into();
                 multiaddr.push(Protocol::Tcp(tcp));
-                multiaddr.push(Protocol::P2p(peer_id.clone().into()));
+                multiaddr.push(Protocol::P2p(peer_id.into()));
                 multiaddrs.push(multiaddr);
             }
         }
@@ -154,7 +154,7 @@ impl EnrExt for Enr {
             if let Some(udp) = self.udp() {
                 let mut multiaddr: Multiaddr = ip.into();
                 multiaddr.push(Protocol::Udp(udp));
-                multiaddr.push(Protocol::P2p(peer_id.clone().into()));
+                multiaddr.push(Protocol::P2p(peer_id.into()));
                 multiaddrs.push(multiaddr);
             }
         }
@@ -203,7 +203,7 @@ impl CombinedKeyPublicExt for CombinedPublicKey {
                     libp2p::core::identity::secp256k1::PublicKey::decode(&pk_bytes)
                         .expect("valid public key"),
                 );
-                PeerId::from_public_key(libp2p_pk)
+                PeerId::from_public_key(&libp2p_pk)
             }
             Self::Ed25519(pk) => {
                 let pk_bytes = pk.to_bytes();
@@ -211,7 +211,7 @@ impl CombinedKeyPublicExt for CombinedPublicKey {
                     libp2p::core::identity::ed25519::PublicKey::decode(&pk_bytes)
                         .expect("valid public key"),
                 );
-                PeerId::from_public_key(libp2p_pk)
+                PeerId::from_public_key(&libp2p_pk)
             }
         }
     }
@@ -254,7 +254,7 @@ pub fn peer_id_to_node_id(peer_id: &PeerId) -> Result<discv5::enr::NodeId, Strin
             let uncompressed_key_bytes = &pk.encode_uncompressed()[1..];
             let mut output = [0_u8; 32];
             let mut hasher = Keccak::v256();
-            hasher.update(&uncompressed_key_bytes);
+            hasher.update(uncompressed_key_bytes);
             hasher.finalize(&mut output);
             Ok(discv5::enr::NodeId::parse(&output).expect("Must be correct length"))
         }
@@ -283,7 +283,7 @@ mod tests {
         let libp2p_sk = libp2p::identity::secp256k1::SecretKey::from_bytes(sk_bytes).unwrap();
         let secp256k1_kp: libp2p::identity::secp256k1::Keypair = libp2p_sk.into();
         let libp2p_kp = Keypair::Secp256k1(secp256k1_kp);
-        let peer_id = libp2p_kp.public().into_peer_id();
+        let peer_id = libp2p_kp.public().to_peer_id();
 
         let enr = discv5::enr::EnrBuilder::new("v4")
             .build(&secret_key)
@@ -304,7 +304,7 @@ mod tests {
         let libp2p_sk = libp2p::identity::ed25519::SecretKey::from_bytes(sk_bytes).unwrap();
         let ed25519_kp: libp2p::identity::ed25519::Keypair = libp2p_sk.into();
         let libp2p_kp = Keypair::Ed25519(ed25519_kp);
-        let peer_id = libp2p_kp.public().into_peer_id();
+        let peer_id = libp2p_kp.public().to_peer_id();
 
         let enr = discv5::enr::EnrBuilder::new("v4").build(&keypair).unwrap();
         let node_id = peer_id_to_node_id(&peer_id).unwrap();

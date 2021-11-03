@@ -2,9 +2,9 @@ use crate::{
     generic_public_key::{GenericPublicKey, TPublicKey},
     Error, Hash256,
 };
+use eth2_serde_utils::hex::encode as hex_encode;
 use serde::de::{Deserialize, Deserializer};
 use serde::ser::{Serialize, Serializer};
-use serde_utils::hex::encode as hex_encode;
 use ssz::{Decode, Encode};
 use std::fmt;
 use std::marker::PhantomData;
@@ -166,7 +166,7 @@ impl<PublicKey, T: TSignature<PublicKey>> fmt::Debug for GenericSignature<Public
 }
 
 #[cfg(feature = "arbitrary")]
-impl<PublicKey: 'static, T: TSignature<PublicKey> + 'static> arbitrary::Arbitrary
+impl<PublicKey: 'static, T: TSignature<PublicKey> + 'static> arbitrary::Arbitrary<'_>
     for GenericSignature<PublicKey, T>
 {
     impl_arbitrary!(SIGNATURE_BYTES_LEN);

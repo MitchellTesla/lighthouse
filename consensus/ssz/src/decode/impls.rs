@@ -2,6 +2,7 @@ use super::*;
 use core::num::NonZeroUsize;
 use ethereum_types::{H256, U128, U256};
 use smallvec::SmallVec;
+use std::sync::Arc;
 
 macro_rules! impl_decodable_for_uint {
     ($type: ident, $bit_size: expr) => {
@@ -241,33 +242,17 @@ impl Decode for NonZeroUsize {
     }
 }
 
-/// The SSZ union type.
-impl<T: Decode> Decode for Option<T> {
+impl<T: Decode> Decode for Arc<T> {
     fn is_ssz_fixed_len() -> bool {
-        false
+        T::is_ssz_fixed_len()
+    }
+
+    fn ssz_fixed_len() -> usize {
+        T::ssz_fixed_len()
     }
 
     fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
-        if bytes.len() < BYTES_PER_LENGTH_OFFSET {
-            return Err(DecodeError::InvalidByteLength {
-                len: bytes.len(),
-                expected: BYTES_PER_LENGTH_OFFSET,
-            });
-        }
-
-        let (index_bytes, value_bytes) = bytes.split_at(BYTES_PER_LENGTH_OFFSET);
-
-        let index = read_union_index(index_bytes)?;
-        if index == 0 {
-            Ok(None)
-        } else if index == 1 {
-            Ok(Some(T::from_ssz_bytes(value_bytes)?))
-        } else {
-            Err(DecodeError::BytesInvalid(format!(
-                "{} is not a valid union index for Option<T>",
-                index
-            )))
-        }
+        T::from_ssz_bytes(bytes).map(Arc::new)
     }
 }
 

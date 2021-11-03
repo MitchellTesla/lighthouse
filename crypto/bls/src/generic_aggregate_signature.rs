@@ -4,9 +4,9 @@ use crate::{
     generic_signature::{GenericSignature, TSignature},
     Error, Hash256, INFINITY_SIGNATURE, SIGNATURE_BYTES_LEN,
 };
+use eth2_serde_utils::hex::encode as hex_encode;
 use serde::de::{Deserialize, Deserializer};
 use serde::ser::{Serialize, Serializer};
-use serde_utils::hex::encode as hex_encode;
 use ssz::{Decode, Encode};
 use std::fmt;
 use std::marker::PhantomData;
@@ -110,6 +110,11 @@ where
         self.point.is_none()
     }
 
+    /// Returns `true` if `self` is equal to the point at infinity.
+    pub fn is_infinity(&self) -> bool {
+        self.is_infinity
+    }
+
     /// Returns a reference to the underlying BLS point.
     pub(crate) fn point(&self) -> Option<&AggSig> {
         self.point.as_ref()
@@ -173,7 +178,7 @@ where
 impl<Pub, AggPub, Sig, AggSig> GenericAggregateSignature<Pub, AggPub, Sig, AggSig>
 where
     Pub: TPublicKey + Clone,
-    AggPub: TAggregatePublicKey + Clone,
+    AggPub: TAggregatePublicKey<Pub> + Clone,
     Sig: TSignature<Pub>,
     AggSig: TAggregateSignature<Pub, AggPub, Sig>,
 {
@@ -186,6 +191,20 @@ where
         match self.point.as_ref() {
             Some(point) => point.fast_aggregate_verify(msg, pubkeys),
             None => false,
+        }
+    }
+
+    /// Wrapper for `fast_aggregate_verify` accepting `G2_POINT_AT_INFINITY` signature when
+    /// `pubkeys` is empty.
+    pub fn eth_fast_aggregate_verify(
+        &self,
+        msg: Hash256,
+        pubkeys: &[&GenericPublicKey<Pub>],
+    ) -> bool {
+        if pubkeys.is_empty() && self.is_infinity() {
+            true
+        } else {
+            self.fast_aggregate_verify(msg, pubkeys)
         }
     }
 
@@ -204,6 +223,20 @@ where
             Some(point) => point.aggregate_verify(msgs, pubkeys),
             None => false,
         }
+    }
+}
+
+/// Allow aggregate signatures to be created from single signatures.
+impl<Pub, AggPub, Sig, AggSig> From<&GenericSignature<Pub, Sig>>
+    for GenericAggregateSignature<Pub, AggPub, Sig, AggSig>
+where
+    Sig: TSignature<Pub>,
+    AggSig: TAggregateSignature<Pub, AggPub, Sig>,
+{
+    fn from(sig: &GenericSignature<Pub, Sig>) -> Self {
+        let mut agg = Self::infinity();
+        agg.add_assign(sig);
+        agg
     }
 }
 
@@ -274,7 +307,7 @@ where
 }
 
 #[cfg(feature = "arbitrary")]
-impl<Pub, AggPub, Sig, AggSig> arbitrary::Arbitrary
+impl<Pub, AggPub, Sig, AggSig> arbitrary::Arbitrary<'_>
     for GenericAggregateSignature<Pub, AggPub, Sig, AggSig>
 where
     Pub: 'static,

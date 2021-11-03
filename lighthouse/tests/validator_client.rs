@@ -194,6 +194,41 @@ fn init_slashing_protections_flag() {
         .with_config(|config| assert!(config.init_slashing_protection));
 }
 
+#[test]
+fn use_long_timeouts_flag() {
+    CommandLineTest::new()
+        .flag("use-long-timeouts", None)
+        .run()
+        .with_config(|config| assert!(config.use_long_timeouts));
+}
+
+#[test]
+fn beacon_nodes_tls_certs_flag() {
+    let dir = TempDir::new().expect("Unable to create temporary directory");
+    CommandLineTest::new()
+        .flag(
+            "beacon-nodes-tls-certs",
+            Some(
+                vec![
+                    dir.path().join("certificate.crt").to_str().unwrap(),
+                    dir.path().join("certificate2.crt").to_str().unwrap(),
+                ]
+                .join(",")
+                .as_str(),
+            ),
+        )
+        .run()
+        .with_config(|config| {
+            assert_eq!(
+                config.beacon_nodes_tls_certs,
+                Some(vec![
+                    dir.path().join("certificate.crt"),
+                    dir.path().join("certificate2.crt")
+                ])
+            )
+        });
+}
+
 // Tests for Graffiti flags.
 #[test]
 fn graffiti_flag() {
@@ -276,6 +311,24 @@ fn http_flag() {
         .with_config(|config| assert!(config.http_api.enabled));
 }
 #[test]
+fn http_address_flag() {
+    let addr = "127.0.0.99".parse::<Ipv4Addr>().unwrap();
+    CommandLineTest::new()
+        .flag("http-address", Some("127.0.0.99"))
+        .flag("unencrypted-http-transport", None)
+        .run()
+        .with_config(|config| assert_eq!(config.http_api.listen_addr, addr));
+}
+#[test]
+#[should_panic]
+fn missing_unencrypted_http_transport_flag() {
+    let addr = "127.0.0.99".parse::<Ipv4Addr>().unwrap();
+    CommandLineTest::new()
+        .flag("http-address", Some("127.0.0.99"))
+        .run()
+        .with_config(|config| assert_eq!(config.http_api.listen_addr, addr));
+}
+#[test]
 fn http_port_flag() {
     CommandLineTest::new()
         .flag("http-port", Some("9090"))
@@ -351,4 +404,17 @@ pub fn malloc_tuning_flag() {
         // Simply ensure that the node can start with this flag, it's very difficult to observe the
         // effects of it.
         .run();
+}
+#[test]
+fn doppelganger_protection_flag() {
+    CommandLineTest::new()
+        .flag("enable-doppelganger-protection", None)
+        .run()
+        .with_config(|config| assert!(config.enable_doppelganger_protection));
+}
+#[test]
+fn no_doppelganger_protection_flag() {
+    CommandLineTest::new()
+        .run()
+        .with_config(|config| assert!(!config.enable_doppelganger_protection));
 }

@@ -60,7 +60,10 @@ impl<'de> Deserialize<'de> for PeerIdSerialized {
     }
 }
 
-pub use crate::types::{error, Enr, GossipTopic, NetworkGlobals, PubsubMessage, SubnetDiscovery};
+pub use crate::types::{
+    error, Enr, EnrSyncCommitteeBitfield, GossipTopic, NetworkGlobals, PubsubMessage, Subnet,
+    SubnetDiscovery,
+};
 pub use behaviour::{BehaviourEvent, Gossipsub, PeerRequestId, Request, Response};
 pub use config::Config as NetworkConfig;
 pub use discovery::{CombinedKeyExt, EnrExt, Eth2Enr};
@@ -71,8 +74,9 @@ pub use libp2p::{core::ConnectedPoint, PeerId, Swarm};
 pub use libp2p::{multiaddr, Multiaddr};
 pub use metrics::scrape_discovery_metrics;
 pub use peer_manager::{
-    client::Client,
-    score::{PeerAction, ReportSource},
-    ConnectionDirection, PeerConnectionStatus, PeerDB, PeerInfo, PeerSyncStatus, SyncInfo,
+    peerdb::client::Client,
+    peerdb::score::{PeerAction, ReportSource},
+    peerdb::PeerDB,
+    ConnectionDirection, PeerConnectionStatus, PeerInfo, PeerManager, SyncInfo, SyncStatus,
 };
 pub use service::{load_private_key, Libp2pEvent, Service, NETWORK_KEY_FILENAME};

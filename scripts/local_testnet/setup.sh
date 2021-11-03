@@ -5,9 +5,11 @@
 # Produces a testnet specification and a genesis state where the genesis time
 # is now + $GENESIS_DELAY.
 #
-# Generates datadirs for multiple validator keys according to the 
-# $VALIDATOR_COUNT and $NODE_COUNT variables.
+# Generates datadirs for multiple validator keys according to the
+# $VALIDATOR_COUNT and $BN_COUNT variables.
 #
+
+set -o nounset -o errexit -o pipefail
 
 source ./vars.env
 
@@ -20,19 +22,20 @@ lcli \
 NOW=`date +%s`
 GENESIS_TIME=`expr $NOW + $GENESIS_DELAY`
 
-
 lcli \
-	--spec mainnet \
 	new-testnet \
+	--spec $SPEC_PRESET \
 	--deposit-contract-address $DEPOSIT_CONTRACT_ADDRESS \
 	--testnet-dir $TESTNET_DIR \
 	--min-genesis-active-validator-count $GENESIS_VALIDATOR_COUNT \
 	--min-genesis-time $GENESIS_TIME \
 	--genesis-delay $GENESIS_DELAY \
 	--genesis-fork-version $GENESIS_FORK_VERSION \
+	--altair-fork-epoch $ALTAIR_FORK_EPOCH \
 	--eth1-id $NETWORK_ID \
 	--eth1-follow-distance 1 \
-	--seconds-per-eth1-block 1 \
+	--seconds-per-slot $SECONDS_PER_SLOT \
+	--seconds-per-eth1-block $SECONDS_PER_ETH1_BLOCK \
 	--force
 
 echo Specification generated at $TESTNET_DIR.
@@ -42,14 +45,14 @@ lcli \
 	insecure-validators \
 	--count $VALIDATOR_COUNT \
 	--base-dir $DATADIR \
-	--node-count $NODE_COUNT
+	--node-count $BN_COUNT
 
 echo Validators generated with keystore passwords at $DATADIR.
 echo "Building genesis state... (this might take a while)"
 
 lcli \
-	--spec mainnet \
 	interop-genesis \
+	--spec $SPEC_PRESET \
 	--genesis-time $GENESIS_TIME \
 	--testnet-dir $TESTNET_DIR \
 	$GENESIS_VALIDATOR_COUNT

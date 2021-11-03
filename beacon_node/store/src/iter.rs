@@ -1,3 +1,4 @@
+use crate::errors::HandleUnavailable;
 use crate::{Error, HotColdDB, ItemStore};
 use std::borrow::Cow;
 use std::marker::PhantomData;
@@ -27,7 +28,7 @@ impl<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>
         store: Arc<HotColdDB<E, Hot, Cold>>,
     ) -> Option<BlockRootsIterator<'a, E, Hot, Cold>> {
         let state = store
-            .get_state(&self.message.state_root, Some(self.message.slot))
+            .get_state(&self.message().state_root(), Some(self.slot()))
             .ok()??;
 
         Some(BlockRootsIterator::owned(store, state))
@@ -161,7 +162,7 @@ impl<'a, T: EthSpec, Hot: ItemStore<T>, Cold: ItemStore<T>> RootsIterator<'a, T,
     pub fn new(store: Arc<HotColdDB<T, Hot, Cold>>, beacon_state: &'a BeaconState<T>) -> Self {
         Self {
             store,
-            slot: beacon_state.slot,
+            slot: beacon_state.slot(),
             beacon_state: Cow::Borrowed(beacon_state),
         }
     }
@@ -169,7 +170,7 @@ impl<'a, T: EthSpec, Hot: ItemStore<T>, Cold: ItemStore<T>> RootsIterator<'a, T,
     pub fn owned(store: Arc<HotColdDB<T, Hot, Cold>>, beacon_state: BeaconState<T>) -> Self {
         Self {
             store,
-            slot: beacon_state.slot,
+            slot: beacon_state.slot(),
             beacon_state: Cow::Owned(beacon_state),
         }
     }
@@ -188,7 +189,7 @@ impl<'a, T: EthSpec, Hot: ItemStore<T>, Cold: ItemStore<T>> RootsIterator<'a, T,
     }
 
     fn do_next(&mut self) -> Result<Option<(Hash256, Hash256, Slot)>, Error> {
-        if self.slot == 0 || self.slot > self.beacon_state.slot {
+        if self.slot == 0 || self.slot > self.beacon_state.slot() {
             return Ok(None);
         }
 
@@ -201,15 +202,20 @@ impl<'a, T: EthSpec, Hot: ItemStore<T>, Cold: ItemStore<T>> RootsIterator<'a, T,
             (Ok(block_root), Ok(state_root)) => Ok(Some((*block_root, *state_root, self.slot))),
             (Err(BeaconStateError::SlotOutOfBounds), Err(BeaconStateError::SlotOutOfBounds)) => {
                 // Read a `BeaconState` from the store that has access to prior historical roots.
-                let beacon_state =
-                    next_historical_root_backtrack_state(&*self.store, &self.beacon_state)?;
+                if let Some(beacon_state) =
+                    next_historical_root_backtrack_state(&*self.store, &self.beacon_state)
+                        .handle_unavailable()?
+                {
+                    self.beacon_state = Cow::Owned(beacon_state);
 
-                self.beacon_state = Cow::Owned(beacon_state);
+                    let block_root = *self.beacon_state.get_block_root(self.slot)?;
+                    let state_root = *self.beacon_state.get_state_root(self.slot)?;
 
-                let block_root = *self.beacon_state.get_block_root(self.slot)?;
-                let state_root = *self.beacon_state.get_state_root(self.slot)?;
-
-                Ok(Some((block_root, state_root, self.slot)))
+                    Ok(Some((block_root, state_root, self.slot)))
+                } else {
+                    // No more states available due to weak subjectivity sync.
+                    Ok(None)
+                }
             }
             (Err(e), _) => Err(e.into()),
             (Ok(_), Err(e)) => Err(e.into()),
@@ -232,6 +238,7 @@ impl<'a, T: EthSpec, Hot: ItemStore<T>, Cold: ItemStore<T>> Iterator
 pub struct ParentRootBlockIterator<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> {
     store: &'a HotColdDB<E, Hot, Cold>,
     next_block_root: Hash256,
+    decode_any_variant: bool,
     _phantom: PhantomData<E>,
 }
 
@@ -242,6 +249,17 @@ impl<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>
         Self {
             store,
             next_block_root: start_block_root,
+            decode_any_variant: false,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Block iterator that is tolerant of blocks that have the wrong fork for their slot.
+    pub fn fork_tolerant(store: &'a HotColdDB<E, Hot, Cold>, start_block_root: Hash256) -> Self {
+        Self {
+            store,
+            next_block_root: start_block_root,
+            decode_any_variant: true,
             _phantom: PhantomData,
         }
     }
@@ -253,11 +271,13 @@ impl<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>
             Ok(None)
         } else {
             let block_root = self.next_block_root;
-            let block = self
-                .store
-                .get_block(&block_root)?
-                .ok_or(Error::BlockNotFound(block_root))?;
-            self.next_block_root = block.message.parent_root;
+            let block = if self.decode_any_variant {
+                self.store.get_block_any_variant(&block_root)
+            } else {
+                self.store.get_block(&block_root)
+            }?
+            .ok_or(Error::BlockNotFound(block_root))?;
+            self.next_block_root = block.message().parent_root();
             Ok(Some((block_root, block)))
         }
     }
@@ -315,6 +335,9 @@ impl<'a, T: EthSpec, Hot: ItemStore<T>, Cold: ItemStore<T>> Iterator
 }
 
 /// Fetch the next state to use whilst backtracking in `*RootsIterator`.
+///
+/// Return `Err(HistoryUnavailable)` in the case where no more backtrack states are available
+/// due to weak subjectivity sync.
 fn next_historical_root_backtrack_state<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
     store: &HotColdDB<E, Hot, Cold>,
     current_state: &BeaconState<E>,
@@ -323,11 +346,18 @@ fn next_historical_root_backtrack_state<E: EthSpec, Hot: ItemStore<E>, Cold: Ite
     // a restore point slot (thus avoiding replaying blocks). In the case where we're
     // not frozen, this just means we might not jump back by the maximum amount on
     // our first jump (i.e. at most 1 extra state load).
-    let new_state_slot = slot_of_prev_restore_point::<E>(current_state.slot);
-    let new_state_root = current_state.get_state_root(new_state_slot)?;
-    Ok(store
-        .get_state(new_state_root, Some(new_state_slot))?
-        .ok_or_else(|| BeaconStateError::MissingBeaconState((*new_state_root).into()))?)
+    let new_state_slot = slot_of_prev_restore_point::<E>(current_state.slot());
+
+    let (_, historic_state_upper_limit) = store.get_historic_state_limits();
+
+    if new_state_slot >= historic_state_upper_limit {
+        let new_state_root = current_state.get_state_root(new_state_slot)?;
+        Ok(store
+            .get_state(new_state_root, Some(new_state_slot))?
+            .ok_or_else(|| BeaconStateError::MissingBeaconState((*new_state_root).into()))?)
+    } else {
+        Err(Error::HistoryUnavailable)
+    }
 }
 
 /// Compute the slot of the last guaranteed restore point in the freezer database.
@@ -339,46 +369,48 @@ fn slot_of_prev_restore_point<E: EthSpec>(current_slot: Slot) -> Slot {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::config::StoreConfig;
     use crate::HotColdDB;
+    use crate::StoreConfig as Config;
+    use beacon_chain::test_utils::BeaconChainHarness;
+    use beacon_chain::types::{ChainSpec, MainnetEthSpec};
     use sloggers::{null::NullLoggerBuilder, Build};
-    use types::{test_utils::TestingBeaconStateBuilder, ChainSpec, Keypair, MainnetEthSpec};
 
     fn get_state<T: EthSpec>() -> BeaconState<T> {
-        let builder = TestingBeaconStateBuilder::from_single_keypair(
-            0,
-            &Keypair::random(),
-            &T::default_spec(),
-        );
-        let (state, _keypairs) = builder.build();
-        state
+        let harness = BeaconChainHarness::builder(T::default())
+            .default_spec()
+            .deterministic_keypairs(1)
+            .fresh_ephemeral_store()
+            .build();
+        harness.advance_slot();
+        harness.get_current_state()
     }
 
     #[test]
     fn block_root_iter() {
         let log = NullLoggerBuilder.build().unwrap();
         let store = Arc::new(
-            HotColdDB::open_ephemeral(StoreConfig::default(), ChainSpec::minimal(), log).unwrap(),
+            HotColdDB::open_ephemeral(Config::default(), ChainSpec::minimal(), log).unwrap(),
         );
         let slots_per_historical_root = MainnetEthSpec::slots_per_historical_root();
 
         let mut state_a: BeaconState<MainnetEthSpec> = get_state();
         let mut state_b: BeaconState<MainnetEthSpec> = get_state();
 
-        state_a.slot = Slot::from(slots_per_historical_root);
-        state_b.slot = Slot::from(slots_per_historical_root * 2);
+        *state_a.slot_mut() = Slot::from(slots_per_historical_root);
+        *state_b.slot_mut() = Slot::from(slots_per_historical_root * 2);
 
         let mut hashes = (0..).map(Hash256::from_low_u64_be);
-
-        for root in &mut state_a.block_roots[..] {
-            *root = hashes.next().unwrap()
+        let roots_a = state_a.block_roots_mut();
+        for i in 0..roots_a.len() {
+            roots_a[i] = hashes.next().unwrap()
         }
-        for root in &mut state_b.block_roots[..] {
-            *root = hashes.next().unwrap()
+        let roots_b = state_b.block_roots_mut();
+        for i in 0..roots_b.len() {
+            roots_b[i] = hashes.next().unwrap()
         }
 
         let state_a_root = hashes.next().unwrap();
-        state_b.state_roots[0] = state_a_root;
+        state_b.state_roots_mut()[0] = state_a_root;
         store.put_state(&state_a_root, &state_a).unwrap();
 
         let iter = BlockRootsIterator::new(store, &state_b);
@@ -405,15 +437,15 @@ mod test {
     fn state_root_iter() {
         let log = NullLoggerBuilder.build().unwrap();
         let store = Arc::new(
-            HotColdDB::open_ephemeral(StoreConfig::default(), ChainSpec::minimal(), log).unwrap(),
+            HotColdDB::open_ephemeral(Config::default(), ChainSpec::minimal(), log).unwrap(),
         );
         let slots_per_historical_root = MainnetEthSpec::slots_per_historical_root();
 
         let mut state_a: BeaconState<MainnetEthSpec> = get_state();
         let mut state_b: BeaconState<MainnetEthSpec> = get_state();
 
-        state_a.slot = Slot::from(slots_per_historical_root);
-        state_b.slot = Slot::from(slots_per_historical_root * 2);
+        *state_a.slot_mut() = Slot::from(slots_per_historical_root);
+        *state_b.slot_mut() = Slot::from(slots_per_historical_root * 2);
 
         let mut hashes = (0..).map(Hash256::from_low_u64_be);
 

@@ -1,6 +1,6 @@
 //! Available RPC methods types and ids.
 
-use crate::types::EnrBitfield;
+use crate::types::{EnrAttestationBitfield, EnrSyncCommitteeBitfield};
 use regex::bytes::Regex;
 use serde::Serialize;
 use ssz_derive::{Decode, Encode};
@@ -10,6 +10,7 @@ use ssz_types::{
 };
 use std::ops::Deref;
 use strum::AsStaticStr;
+use superstruct::superstruct;
 use types::{Epoch, EthSpec, Hash256, SignedBeaconBlock, Slot};
 
 /// Maximum number of blocks in a single request.
@@ -93,13 +94,24 @@ pub struct Ping {
 }
 
 /// The METADATA response structure.
-#[derive(Encode, Decode, Clone, Debug, PartialEq, Serialize)]
+#[superstruct(
+    variants(V1, V2),
+    variant_attributes(
+        derive(Encode, Decode, Clone, Debug, PartialEq, Serialize),
+        serde(bound = "T: EthSpec", deny_unknown_fields),
+    )
+)]
+#[derive(Clone, Debug, PartialEq, Serialize, Encode)]
 #[serde(bound = "T: EthSpec")]
+#[ssz(enum_behaviour = "transparent")]
 pub struct MetaData<T: EthSpec> {
     /// A sequential counter indicating when data gets modified.
     pub seq_number: u64,
-    /// The persistent subnet bitfield.
-    pub attnets: EnrBitfield<T>,
+    /// The persistent attestation subnet bitfield.
+    pub attnets: EnrAttestationBitfield<T>,
+    /// The persistent sync committee bitfield.
+    #[superstruct(only(V2))]
+    pub syncnets: EnrSyncCommitteeBitfield<T>,
 }
 
 /// The reason given for a `Goodbye` message.
@@ -130,6 +142,9 @@ pub enum GoodbyeReason {
     /// The peer is banned
     Banned = 251,
 
+    /// The IP address the peer is using is banned.
+    BannedIP = 252,
+
     /// Unknown reason.
     Unknown = 0,
 }
@@ -144,14 +159,15 @@ impl From<u64> for GoodbyeReason {
             129 => GoodbyeReason::TooManyPeers,
             250 => GoodbyeReason::BadScore,
             251 => GoodbyeReason::Banned,
+            252 => GoodbyeReason::BannedIP,
             _ => GoodbyeReason::Unknown,
         }
     }
 }
 
-impl Into<u64> for GoodbyeReason {
-    fn into(self) -> u64 {
-        self as u64
+impl From<GoodbyeReason> for u64 {
+    fn from(reason: GoodbyeReason) -> u64 {
+        reason as u64
     }
 }
 
@@ -354,13 +370,13 @@ impl<T: EthSpec> std::fmt::Display for RPCResponse<T> {
         match self {
             RPCResponse::Status(status) => write!(f, "{}", status),
             RPCResponse::BlocksByRange(block) => {
-                write!(f, "BlocksByRange: Block slot: {}", block.message.slot)
+                write!(f, "BlocksByRange: Block slot: {}", block.slot())
             }
             RPCResponse::BlocksByRoot(block) => {
-                write!(f, "BlocksByRoot: BLock slot: {}", block.message.slot)
+                write!(f, "BlocksByRoot: Block slot: {}", block.slot())
             }
             RPCResponse::Pong(ping) => write!(f, "Pong: {}", ping.data),
-            RPCResponse::MetaData(metadata) => write!(f, "Metadata: {}", metadata.seq_number),
+            RPCResponse::MetaData(metadata) => write!(f, "Metadata: {}", metadata.seq_number()),
         }
     }
 }
@@ -385,6 +401,7 @@ impl std::fmt::Display for GoodbyeReason {
             GoodbyeReason::TooManyPeers => write!(f, "Too many peers"),
             GoodbyeReason::BadScore => write!(f, "Bad Score"),
             GoodbyeReason::Banned => write!(f, "Banned"),
+            GoodbyeReason::BannedIP => write!(f, "BannedIP"),
             GoodbyeReason::Unknown => write!(f, "Unknown Reason"),
         }
     }

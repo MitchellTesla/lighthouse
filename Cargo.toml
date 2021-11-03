@@ -33,10 +33,10 @@ members = [
     "common/logging",
     "common/lru_cache",
     "common/malloc_utils",
-    "common/remote_signer_consumer",
     "common/sensitive_url",
     "common/slot_clock",
     "common/task_executor",
+    "common/target_check",
     "common/test_random_derive",
     "common/validator_dir",
     "common/warp_utils",
@@ -68,19 +68,16 @@ members = [
     "lighthouse",
     "lighthouse/environment",
 
-    "remote_signer",
-    "remote_signer/backend",
-    "remote_signer/client",
-
     "slasher",
     "slasher/service",
 
     "testing/ef_tests",
     "testing/eth1_test_rig",
     "testing/node_test_rig",
-    "testing/remote_signer_test",
     "testing/simulator",
+    "testing/test-test_logger",
     "testing/state_transition_vectors",
+    "testing/web3signer_tests",
 
     "validator_client",
     "validator_client/slashing_protection",
@@ -88,9 +85,9 @@ members = [
 
 [patch]
 [patch.crates-io]
+eth2_ssz = { path = "consensus/ssz" }
+eth2_ssz_types = { path = "consensus/ssz_types" }
+eth2_ssz_derive = { path = "consensus/ssz_derive" }
 tree_hash = { path = "consensus/tree_hash" }
 tree_hash_derive = { path = "consensus/tree_hash_derive" }
-eth2_ssz = { path = "consensus/ssz" }
-eth2_ssz_derive = { path = "consensus/ssz_derive" }
-eth2_ssz_types = { path = "consensus/ssz_types" }
-eth2_hashing = { path = "crypto/eth2_hashing" }
+fixed-hash = { git = "https://github.com/paritytech/parity-common", rev="df638ab0885293d21d656dc300d39236b69ce57d" }

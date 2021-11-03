@@ -3,8 +3,10 @@ use crate::behaviour::{
 };
 use crate::discovery::enr;
 use crate::multiaddr::Protocol;
-use crate::rpc::{GoodbyeReason, MetaData, RPCResponseErrorCode, RequestId};
-use crate::types::{error, EnrBitfield, GossipKind};
+use crate::rpc::{
+    GoodbyeReason, MetaData, MetaDataV1, MetaDataV2, RPCResponseErrorCode, RequestId,
+};
+use crate::types::{error, EnrAttestationBitfield, EnrSyncCommitteeBitfield, GossipKind};
 use crate::EnrExt;
 use crate::{NetworkConfig, NetworkGlobals, PeerAction, ReportSource};
 use futures::prelude::*;
@@ -25,7 +27,9 @@ use std::io::prelude::*;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use types::{ChainSpec, EnrForkId, EthSpec};
+use types::{ChainSpec, EnrForkId, EthSpec, ForkContext};
+
+use crate::peer_manager::{MIN_OUTBOUND_ONLY_FACTOR, PEER_EXCESS_FACTOR, PRIORITY_PEER_EXCESS};
 
 pub const NETWORK_KEY_FILENAME: &str = "key";
 /// The maximum simultaneous libp2p connections per peer.
@@ -64,6 +68,7 @@ impl<TSpec: EthSpec> Service<TSpec> {
         config: &NetworkConfig,
         enr_fork_id: EnrForkId,
         log: &Logger,
+        fork_context: Arc<ForkContext>,
         chain_spec: &ChainSpec,
     ) -> error::Result<(Arc<NetworkGlobals<TSpec>>, Self)> {
         let log = log.new(o!("service"=> "libp2p"));
@@ -110,9 +115,10 @@ impl<TSpec: EthSpec> Service<TSpec> {
             // Lighthouse network behaviour
             let behaviour = Behaviour::new(
                 &local_keypair,
-                config,
+                config.clone(),
                 network_globals.clone(),
                 &log,
+                fork_context,
                 chain_spec,
             )
             .await?;
@@ -129,8 +135,18 @@ impl<TSpec: EthSpec> Service<TSpec> {
             let limits = ConnectionLimits::default()
                 .with_max_pending_incoming(Some(5))
                 .with_max_pending_outgoing(Some(16))
-                .with_max_established_incoming(Some((config.target_peers as f64 * 1.2) as u32))
-                .with_max_established_outgoing(Some((config.target_peers as f64 * 1.2) as u32))
+                .with_max_established_incoming(Some(
+                    (config.target_peers as f32
+                        * (1.0 + PEER_EXCESS_FACTOR - MIN_OUTBOUND_ONLY_FACTOR))
+                        .ceil() as u32,
+                ))
+                .with_max_established_outgoing(Some(
+                    (config.target_peers as f32 * (1.0 + PEER_EXCESS_FACTOR)).ceil() as u32,
+                ))
+                .with_max_established(Some(
+                    (config.target_peers as f32 * (1.0 + PEER_EXCESS_FACTOR + PRIORITY_PEER_EXCESS))
+                        .ceil() as u32,
+                ))
                 .with_max_established_per_peer(Some(MAX_CONNECTIONS_PER_PEER));
 
             (
@@ -221,7 +237,7 @@ impl<TSpec: EthSpec> Service<TSpec> {
         let mut subscribed_topics: Vec<GossipKind> = vec![];
 
         for topic_kind in &config.topics {
-            if swarm.subscribe_kind(topic_kind.clone()) {
+            if swarm.behaviour_mut().subscribe_kind(topic_kind.clone()) {
                 subscribed_topics.push(topic_kind.clone());
             } else {
                 warn!(log, "Could not subscribe to topic"; "topic" => %topic_kind);
@@ -244,7 +260,9 @@ impl<TSpec: EthSpec> Service<TSpec> {
 
     /// Sends a request to a peer, with a given Id.
     pub fn send_request(&mut self, peer_id: PeerId, request_id: RequestId, request: Request) {
-        self.swarm.send_request(peer_id, request_id, request);
+        self.swarm
+            .behaviour_mut()
+            .send_request(peer_id, request_id, request);
     }
 
     /// Informs the peer that their request failed.
@@ -255,42 +273,80 @@ impl<TSpec: EthSpec> Service<TSpec> {
         error: RPCResponseErrorCode,
         reason: String,
     ) {
-        self.swarm._send_error_reponse(peer_id, id, error, reason);
+        self.swarm
+            .behaviour_mut()
+            .send_error_reponse(peer_id, id, error, reason);
     }
 
     /// Report a peer's action.
     pub fn report_peer(&mut self, peer_id: &PeerId, action: PeerAction, source: ReportSource) {
-        self.swarm.report_peer(peer_id, action, source);
+        self.swarm
+            .behaviour_mut()
+            .peer_manager_mut()
+            .report_peer(peer_id, action, source, None);
     }
 
     /// Disconnect and ban a peer, providing a reason.
     pub fn goodbye_peer(&mut self, peer_id: &PeerId, reason: GoodbyeReason, source: ReportSource) {
-        self.swarm.goodbye_peer(peer_id, reason, source);
+        self.swarm
+            .behaviour_mut()
+            .goodbye_peer(peer_id, reason, source);
     }
 
     /// Sends a response to a peer's request.
     pub fn send_response(&mut self, peer_id: PeerId, id: PeerRequestId, response: Response<TSpec>) {
-        self.swarm.send_successful_response(peer_id, id, response);
+        self.swarm
+            .behaviour_mut()
+            .send_successful_response(peer_id, id, response);
     }
 
     pub async fn next_event(&mut self) -> Libp2pEvent<TSpec> {
         loop {
-            match self.swarm.next_event().await {
-                SwarmEvent::Behaviour(behaviour) => return Libp2pEvent::Behaviour(behaviour),
-                SwarmEvent::ConnectionEstablished { .. } => {
-                    // A connection could be established with a banned peer. This is
-                    // handled inside the behaviour.
+            match self.swarm.select_next_some().await {
+                SwarmEvent::Behaviour(behaviour) => {
+                    // Handle banning here
+                    match &behaviour {
+                        BehaviourEvent::PeerBanned(peer_id) => {
+                            self.swarm.ban_peer_id(*peer_id);
+                        }
+                        BehaviourEvent::PeerUnbanned(peer_id) => {
+                            self.swarm.unban_peer_id(*peer_id);
+                        }
+                        _ => {}
+                    }
+                    return Libp2pEvent::Behaviour(behaviour);
+                }
+                SwarmEvent::ConnectionEstablished {
+                    peer_id,
+                    endpoint,
+                    num_established,
+                } => {
+                    // Inform the peer manager.
+                    // We require the ENR to inject into the peer db, if it exists.
+                    let enr = self
+                        .swarm
+                        .behaviour_mut()
+                        .discovery_mut()
+                        .enr_of_peer(&peer_id);
+                    self.swarm
+                        .behaviour_mut()
+                        .peer_manager_mut()
+                        .inject_connection_established(peer_id, endpoint, num_established, enr);
                 }
                 SwarmEvent::ConnectionClosed {
                     peer_id,
-                    cause,
-                    endpoint: _,
+                    cause: _,
+                    endpoint,
                     num_established,
                 } => {
-                    trace!(self.log, "Connection closed"; "peer_id" => %peer_id, "cause" => ?cause, "connections" => num_established);
+                    // Inform the peer manager.
+                    self.swarm
+                        .behaviour_mut()
+                        .peer_manager_mut()
+                        .inject_connection_closed(peer_id, endpoint, num_established);
                 }
-                SwarmEvent::NewListenAddr(multiaddr) => {
-                    return Libp2pEvent::NewListenAddr(multiaddr)
+                SwarmEvent::NewListenAddr { address, .. } => {
+                    return Libp2pEvent::NewListenAddr(address)
                 }
                 SwarmEvent::IncomingConnection {
                     local_addr,
@@ -303,10 +359,10 @@ impl<TSpec: EthSpec> Service<TSpec> {
                     send_back_addr,
                     error,
                 } => {
-                    debug!(self.log, "Failed incoming connection"; "our_addr" => %local_addr, "from" => %send_back_addr, "error" => %error)
+                    debug!(self.log, "Failed incoming connection"; "our_addr" => %local_addr, "from" => %send_back_addr, "error" => %error);
                 }
-                SwarmEvent::BannedPeer { .. } => {
-                    // We do not ban peers at the swarm layer, so this should never occur.
+                SwarmEvent::BannedPeer { peer_id, .. } => {
+                    debug!(self.log, "Banned peer connection rejected"; "peer_id" => %peer_id);
                 }
                 SwarmEvent::UnreachableAddr {
                     peer_id,
@@ -315,20 +371,26 @@ impl<TSpec: EthSpec> Service<TSpec> {
                     attempts_remaining,
                 } => {
                     debug!(self.log, "Failed to dial address"; "peer_id" => %peer_id, "address" => %address, "error" => %error, "attempts_remaining" => attempts_remaining);
+                    self.swarm
+                        .behaviour_mut()
+                        .peer_manager_mut()
+                        .inject_dial_failure(&peer_id);
                 }
                 SwarmEvent::UnknownPeerUnreachableAddr { address, error } => {
                     debug!(self.log, "Peer not known at dialed address"; "address" => %address, "error" => %error);
                 }
-                SwarmEvent::ExpiredListenAddr(multiaddr) => {
-                    debug!(self.log, "Listen address expired"; "multiaddr" => %multiaddr)
+                SwarmEvent::ExpiredListenAddr { address, .. } => {
+                    debug!(self.log, "Listen address expired"; "address" => %address)
                 }
-                SwarmEvent::ListenerClosed { addresses, reason } => {
+                SwarmEvent::ListenerClosed {
+                    addresses, reason, ..
+                } => {
                     crit!(self.log, "Listener closed"; "addresses" => ?addresses, "reason" => ?reason);
                     if Swarm::listeners(&self.swarm).count() == 0 {
                         return Libp2pEvent::ZeroListeners;
                     }
                 }
-                SwarmEvent::ListenerError { error } => {
+                SwarmEvent::ListenerError { error, .. } => {
                     // this is non fatal, but we still check
                     warn!(self.log, "Listener error"; "error" => ?error);
                     if Swarm::listeners(&self.swarm).count() == 0 {
@@ -336,7 +398,16 @@ impl<TSpec: EthSpec> Service<TSpec> {
                     }
                 }
                 SwarmEvent::Dialing(peer_id) => {
-                    debug!(self.log, "Dialing peer"; "peer_id" => %peer_id);
+                    // We require the ENR to inject into the peer db, if it exists.
+                    let enr = self
+                        .swarm
+                        .behaviour_mut()
+                        .discovery_mut()
+                        .enr_of_peer(&peer_id);
+                    self.swarm
+                        .behaviour_mut()
+                        .peer_manager_mut()
+                        .inject_dialing(&peer_id, enr);
                 }
             }
         }
@@ -350,8 +421,8 @@ type BoxedTransport = Boxed<(PeerId, StreamMuxerBox)>;
 fn build_transport(
     local_private_key: Keypair,
 ) -> std::io::Result<(BoxedTransport, Arc<BandwidthSinks>)> {
-    let transport = libp2p::tcp::TokioTcpConfig::new().nodelay(true);
-    let transport = libp2p::dns::DnsConfig::new(transport)?;
+    let tcp = libp2p::tcp::TokioTcpConfig::new().nodelay(true);
+    let transport = libp2p::dns::TokioDnsConfig::system(tcp)?;
     #[cfg(feature = "libp2p-websocket")]
     let transport = {
         let trans_clone = transport.clone();
@@ -365,13 +436,17 @@ fn build_transport(
     mplex_config.set_max_buffer_size(256);
     mplex_config.set_max_buffer_behaviour(libp2p::mplex::MaxBufferBehaviour::Block);
 
+    // yamux config
+    let mut yamux_config = libp2p::yamux::YamuxConfig::default();
+    yamux_config.set_window_update_mode(libp2p::yamux::WindowUpdateMode::on_read());
+
     // Authentication
     Ok((
         transport
             .upgrade(core::upgrade::Version::V1)
             .authenticate(generate_noise_config(&local_private_key))
             .multiplex(core::upgrade::SelectUpgrade::new(
-                libp2p::yamux::YamuxConfig::default(),
+                yamux_config,
                 mplex_config,
             ))
             .timeout(Duration::from_secs(10))
@@ -477,37 +552,57 @@ fn load_or_build_metadata<E: EthSpec>(
     network_dir: &std::path::Path,
     log: &slog::Logger,
 ) -> MetaData<E> {
-    // Default metadata
-    let mut meta_data = MetaData {
+    // We load a V2 metadata version by default (regardless of current fork)
+    // since a V2 metadata can be converted to V1. The RPC encoder is responsible
+    // for sending the correct metadata version based on the negotiated protocol version.
+    let mut meta_data = MetaDataV2 {
         seq_number: 0,
-        attnets: EnrBitfield::<E>::default(),
+        attnets: EnrAttestationBitfield::<E>::default(),
+        syncnets: EnrSyncCommitteeBitfield::<E>::default(),
     };
     // Read metadata from persisted file if available
     let metadata_path = network_dir.join(METADATA_FILENAME);
     if let Ok(mut metadata_file) = File::open(metadata_path) {
         let mut metadata_ssz = Vec::new();
         if metadata_file.read_to_end(&mut metadata_ssz).is_ok() {
-            match MetaData::<E>::from_ssz_bytes(&metadata_ssz) {
+            // Attempt to read a MetaDataV2 version from the persisted file,
+            // if that fails, read MetaDataV1
+            match MetaDataV2::<E>::from_ssz_bytes(&metadata_ssz) {
                 Ok(persisted_metadata) => {
                     meta_data.seq_number = persisted_metadata.seq_number;
                     // Increment seq number if persisted attnet is not default
-                    if persisted_metadata.attnets != meta_data.attnets {
+                    if persisted_metadata.attnets != meta_data.attnets
+                        || persisted_metadata.syncnets != meta_data.syncnets
+                    {
                         meta_data.seq_number += 1;
                     }
                     debug!(log, "Loaded metadata from disk");
                 }
-                Err(e) => {
-                    debug!(
-                        log,
-                        "Metadata from file could not be decoded";
-                        "error" => ?e,
-                    );
+                Err(_) => {
+                    match MetaDataV1::<E>::from_ssz_bytes(&metadata_ssz) {
+                        Ok(persisted_metadata) => {
+                            let persisted_metadata = MetaData::V1(persisted_metadata);
+                            // Increment seq number as the persisted metadata version is updated
+                            meta_data.seq_number = *persisted_metadata.seq_number() + 1;
+                            debug!(log, "Loaded metadata from disk");
+                        }
+                        Err(e) => {
+                            debug!(
+                                log,
+                                "Metadata from file could not be decoded";
+                                "error" => ?e,
+                            );
+                        }
+                    }
                 }
             }
         }
     };
 
-    debug!(log, "Metadata sequence number"; "seq_num" => meta_data.seq_number);
-    save_metadata_to_disk(network_dir, meta_data.clone(), &log);
+    // Wrap the MetaData
+    let meta_data = MetaData::V2(meta_data);
+
+    debug!(log, "Metadata sequence number"; "seq_num" => meta_data.seq_number());
+    save_metadata_to_disk(network_dir, meta_data.clone(), log);
     meta_data
 }

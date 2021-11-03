@@ -209,7 +209,7 @@ impl<E: EthSpec> CandidateBeaconNode<E> {
 
     /// Checks if the node has the correct specification.
     async fn is_compatible(&self, spec: &ChainSpec, log: &Logger) -> Result<(), CandidateError> {
-        let yaml_config = self
+        let config_and_preset = self
             .beacon_node
             .get_config_spec()
             .await
@@ -224,9 +224,8 @@ impl<E: EthSpec> CandidateBeaconNode<E> {
             })?
             .data;
 
-        let beacon_node_spec = yaml_config
-            .apply_to_chain_spec::<E>(&E::default_spec())
-            .ok_or_else(|| {
+        let beacon_node_spec =
+            ChainSpec::from_config::<E>(&config_and_preset.config).ok_or_else(|| {
                 error!(
                     log,
                     "The minimal/mainnet spec type of the beacon node does not match the validator \
@@ -236,25 +235,44 @@ impl<E: EthSpec> CandidateBeaconNode<E> {
                 CandidateError::Incompatible
             })?;
 
-        if !yaml_config.extra_fields.is_empty() {
+        if !config_and_preset.extra_fields.is_empty() {
             debug!(
                 log,
                 "Beacon spec includes unknown fields";
-                "fields" => ?yaml_config.extra_fields
+                "endpoint" => %self.beacon_node,
+                "fields" => ?config_and_preset.extra_fields,
             );
         }
 
-        if *spec == beacon_node_spec {
-            Ok(())
-        } else {
+        if beacon_node_spec.genesis_fork_version != spec.genesis_fork_version {
             error!(
                 log,
-                "The beacon node is using a different Eth2 specification to this validator client. \
-                See the --network command.";
+                "Beacon node is configured for a different network";
                 "endpoint" => %self.beacon_node,
+                "bn_genesis_fork" => ?beacon_node_spec.genesis_fork_version,
+                "our_genesis_fork" => ?spec.genesis_fork_version,
             );
-            Err(CandidateError::Incompatible)
+            return Err(CandidateError::Incompatible);
+        } else if *spec != beacon_node_spec {
+            warn!(
+                log,
+                "Beacon node config does not match exactly";
+                "endpoint" => %self.beacon_node,
+                "advice" => "check that the BN is updated and configured for any upcoming forks",
+            );
+            debug!(
+                log,
+                "Beacon node config";
+                "config" => ?beacon_node_spec,
+            );
+            debug!(
+                log,
+                "Our config";
+                "config" => ?spec,
+            );
         }
+
+        Ok(())
     }
 
     /// Checks if the beacon node is synced.
@@ -355,7 +373,7 @@ impl<T: SlotClock, E: EthSpec> BeaconNodeFallback<T, E> {
             // status of nodes that were previously not-synced.
             if candidate.status(RequireSynced::Yes).await.is_err() {
                 // There exists a race-condition that could result in `refresh_status` being called
-                // when the status does not require refreshing anymore. This deemed is an
+                // when the status does not require refreshing anymore. This is deemed an
                 // acceptable inefficiency.
                 futures.push(candidate.refresh_status(
                     self.slot_clock.as_ref(),

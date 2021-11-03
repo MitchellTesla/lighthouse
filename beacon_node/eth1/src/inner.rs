@@ -5,10 +5,15 @@ use crate::{
     service::EndpointsCache,
 };
 use parking_lot::RwLock;
+use ssz::four_byte_option_impl;
 use ssz::{Decode, Encode};
 use ssz_derive::{Decode, Encode};
 use std::sync::Arc;
 use types::ChainSpec;
+
+// Define "legacy" implementations of `Option<u64>` which use four bytes for encoding the union
+// selector.
+four_byte_option_impl!(four_byte_option_u64, u64);
 
 #[derive(Default)]
 pub struct DepositUpdater {
@@ -48,7 +53,7 @@ impl Inner {
 
     /// Encode the eth1 block and deposit cache as bytes.
     pub fn as_bytes(&self) -> Vec<u8> {
-        let ssz_eth1_cache = SszEth1Cache::from_inner(&self);
+        let ssz_eth1_cache = SszEth1Cache::from_inner(self);
         ssz_eth1_cache.as_ssz_bytes()
     }
 
@@ -69,6 +74,7 @@ impl Inner {
 pub struct SszEth1Cache {
     block_cache: BlockCache,
     deposit_cache: SszDepositCache,
+    #[ssz(with = "four_byte_option_u64")]
     last_processed_block: Option<u64>,
 }
 

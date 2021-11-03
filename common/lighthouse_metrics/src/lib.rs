@@ -54,14 +54,14 @@
 //! }
 //! ```
 
-use prometheus::{HistogramOpts, HistogramTimer, Opts};
+use prometheus::{HistogramOpts, Opts};
 use std::time::Duration;
 
 use prometheus::core::{Atomic, GenericGauge, GenericGaugeVec};
 pub use prometheus::{
     proto::{Metric, MetricFamily, MetricType},
-    Encoder, Gauge, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge,
-    IntGaugeVec, Result, TextEncoder,
+    Encoder, Gauge, GaugeVec, Histogram, HistogramTimer, HistogramVec, IntCounter, IntCounterVec,
+    IntGauge, IntGaugeVec, Result, TextEncoder,
 };
 
 /// Collect all the metrics for reporting.
@@ -280,6 +280,18 @@ pub fn inc_counter_by(counter: &Result<IntCounter>, value: u64) {
 pub fn set_gauge_vec(int_gauge_vec: &Result<IntGaugeVec>, name: &[&str], value: i64) {
     if let Some(gauge) = get_int_gauge(int_gauge_vec, name) {
         gauge.set(value);
+    }
+}
+
+pub fn inc_gauge_vec(int_gauge_vec: &Result<IntGaugeVec>, name: &[&str]) {
+    if let Some(gauge) = get_int_gauge(int_gauge_vec, name) {
+        gauge.inc();
+    }
+}
+
+pub fn dec_gauge_vec(int_gauge_vec: &Result<IntGaugeVec>, name: &[&str]) {
+    if let Some(gauge) = get_int_gauge(int_gauge_vec, name) {
+        gauge.dec();
     }
 }
 

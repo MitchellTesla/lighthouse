@@ -1,8 +1,13 @@
 use crate::{error::Error, Block};
 use serde_derive::{Deserialize, Serialize};
+use ssz::four_byte_option_impl;
 use ssz_derive::{Decode, Encode};
 use std::collections::HashMap;
 use types::{AttestationShufflingId, Epoch, Hash256, Slot};
+
+// Define a "legacy" implementation of `Option<usize>` which uses four bytes for encoding the union
+// selector.
+four_byte_option_impl!(four_byte_option_usize, usize);
 
 #[derive(Clone, PartialEq, Debug, Encode, Decode, Serialize, Deserialize)]
 pub struct ProtoNode {
@@ -21,11 +26,14 @@ pub struct ProtoNode {
     pub current_epoch_shuffling_id: AttestationShufflingId,
     pub next_epoch_shuffling_id: AttestationShufflingId,
     pub root: Hash256,
+    #[ssz(with = "four_byte_option_usize")]
     pub parent: Option<usize>,
     pub justified_epoch: Epoch,
     pub finalized_epoch: Epoch,
     weight: u64,
+    #[ssz(with = "four_byte_option_usize")]
     best_child: Option<usize>,
+    #[ssz(with = "four_byte_option_usize")]
     best_descendant: Option<usize>,
 }
 
@@ -210,7 +218,7 @@ impl ProtoArray {
             .ok_or(Error::InvalidBestDescendant(best_descendant_index))?;
 
         // Perform a sanity check that the node is indeed valid to be the head.
-        if !self.node_is_viable_for_head(&best_node) {
+        if !self.node_is_viable_for_head(best_node) {
             return Err(Error::InvalidBestNode {
                 start_root: *justified_root,
                 justified_epoch: self.justified_epoch,
@@ -321,7 +329,7 @@ impl ProtoArray {
             .get(parent_index)
             .ok_or(Error::InvalidNodeIndex(parent_index))?;
 
-        let child_leads_to_viable_head = self.node_leads_to_viable_head(&child)?;
+        let child_leads_to_viable_head = self.node_leads_to_viable_head(child)?;
 
         // These three variables are aliases to the three options that we may set the
         // `parent.best_child` and `parent.best_descendant` to.
@@ -334,54 +342,54 @@ impl ProtoArray {
         );
         let no_change = (parent.best_child, parent.best_descendant);
 
-        let (new_best_child, new_best_descendant) =
-            if let Some(best_child_index) = parent.best_child {
-                if best_child_index == child_index && !child_leads_to_viable_head {
-                    // If the child is already the best-child of the parent but it's not viable for
-                    // the head, remove it.
-                    change_to_none
-                } else if best_child_index == child_index {
-                    // If the child is the best-child already, set it again to ensure that the
-                    // best-descendant of the parent is updated.
-                    change_to_child
-                } else {
-                    let best_child = self
-                        .nodes
-                        .get(best_child_index)
-                        .ok_or(Error::InvalidBestDescendant(best_child_index))?;
-
-                    let best_child_leads_to_viable_head =
-                        self.node_leads_to_viable_head(&best_child)?;
-
-                    if child_leads_to_viable_head && !best_child_leads_to_viable_head {
-                        // The child leads to a viable head, but the current best-child doesn't.
-                        change_to_child
-                    } else if !child_leads_to_viable_head && best_child_leads_to_viable_head {
-                        // The best child leads to a viable head, but the child doesn't.
-                        no_change
-                    } else if child.weight == best_child.weight {
-                        // Tie-breaker of equal weights by root.
-                        if child.root >= best_child.root {
-                            change_to_child
-                        } else {
-                            no_change
-                        }
-                    } else {
-                        // Choose the winner by weight.
-                        if child.weight >= best_child.weight {
-                            change_to_child
-                        } else {
-                            no_change
-                        }
-                    }
-                }
-            } else if child_leads_to_viable_head {
-                // There is no current best-child and the child is viable.
+        let (new_best_child, new_best_descendant) = if let Some(best_child_index) =
+            parent.best_child
+        {
+            if best_child_index == child_index && !child_leads_to_viable_head {
+                // If the child is already the best-child of the parent but it's not viable for
+                // the head, remove it.
+                change_to_none
+            } else if best_child_index == child_index {
+                // If the child is the best-child already, set it again to ensure that the
+                // best-descendant of the parent is updated.
                 change_to_child
             } else {
-                // There is no current best-child but the child is not viable.
-                no_change
-            };
+                let best_child = self
+                    .nodes
+                    .get(best_child_index)
+                    .ok_or(Error::InvalidBestDescendant(best_child_index))?;
+
+                let best_child_leads_to_viable_head = self.node_leads_to_viable_head(best_child)?;
+
+                if child_leads_to_viable_head && !best_child_leads_to_viable_head {
+                    // The child leads to a viable head, but the current best-child doesn't.
+                    change_to_child
+                } else if !child_leads_to_viable_head && best_child_leads_to_viable_head {
+                    // The best child leads to a viable head, but the child doesn't.
+                    no_change
+                } else if child.weight == best_child.weight {
+                    // Tie-breaker of equal weights by root.
+                    if child.root >= best_child.root {
+                        change_to_child
+                    } else {
+                        no_change
+                    }
+                } else {
+                    // Choose the winner by weight.
+                    if child.weight >= best_child.weight {
+                        change_to_child
+                    } else {
+                        no_change
+                    }
+                }
+            }
+        } else if child_leads_to_viable_head {
+            // There is no current best-child and the child is viable.
+            change_to_child
+        } else {
+            // There is no current best-child but the child is not viable.
+            no_change
+        };
 
         let parent = self
             .nodes

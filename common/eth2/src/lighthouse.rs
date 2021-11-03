@@ -2,16 +2,22 @@
 
 use crate::{
     ok_or_error,
-    types::{BeaconState, Epoch, EthSpec, GenericResponse, ValidatorId},
+    types::{BeaconState, ChainSpec, Epoch, EthSpec, GenericResponse, ValidatorId},
     BeaconNodeHttpClient, DepositData, Error, Eth1Data, Hash256, StateId, StatusCode,
 };
 use proto_array::core::ProtoArray;
 use reqwest::IntoUrl;
 use serde::{Deserialize, Serialize};
-use ssz::Decode;
+use ssz::four_byte_option_impl;
 use ssz_derive::{Decode, Encode};
+use store::{AnchorInfo, Split};
 
 pub use eth2_libp2p::{types::SyncState, PeerInfo};
+
+// Define "legacy" implementations of `Option<T>` which use four bytes for encoding the union
+// selector.
+four_byte_option_impl!(four_byte_option_u64, u64);
+four_byte_option_impl!(four_byte_option_hash256, Hash256);
 
 /// Information returned by `peers` and `connected_peers`.
 // TODO: this should be deserializable..
@@ -33,13 +39,9 @@ pub struct GlobalValidatorInclusionData {
     pub current_epoch_active_gwei: u64,
     /// The total effective balance of all active validators during the _previous_ epoch.
     pub previous_epoch_active_gwei: u64,
-    /// The total effective balance of all validators who attested during the _current_ epoch.
-    pub current_epoch_attesting_gwei: u64,
     /// The total effective balance of all validators who attested during the _current_ epoch and
     /// agreed with the state about the beacon block at the first slot of the _current_ epoch.
     pub current_epoch_target_attesting_gwei: u64,
-    /// The total effective balance of all validators who attested during the _previous_ epoch.
-    pub previous_epoch_attesting_gwei: u64,
     /// The total effective balance of all validators who attested during the _previous_ epoch and
     /// agreed with the state about the beacon block at the first slot of the _previous_ epoch.
     pub previous_epoch_target_attesting_gwei: u64,
@@ -54,19 +56,15 @@ pub struct ValidatorInclusionData {
     pub is_slashed: bool,
     /// True if the validator can withdraw in the current epoch.
     pub is_withdrawable_in_current_epoch: bool,
-    /// True if the validator was active in the state's _current_ epoch.
-    pub is_active_in_current_epoch: bool,
-    /// True if the validator was active in the state's _previous_ epoch.
-    pub is_active_in_previous_epoch: bool,
+    /// True if the validator was active and not slashed in the state's _current_ epoch.
+    pub is_active_unslashed_in_current_epoch: bool,
+    /// True if the validator was active and not slashed in the state's _previous_ epoch.
+    pub is_active_unslashed_in_previous_epoch: bool,
     /// The validator's effective balance in the _current_ epoch.
     pub current_epoch_effective_balance_gwei: u64,
-    /// True if the validator had an attestation included in the _current_ epoch.
-    pub is_current_epoch_attester: bool,
     /// True if the validator's beacon block root attestation for the first slot of the _current_
     /// epoch matches the block root known to the state.
     pub is_current_epoch_target_attester: bool,
-    /// True if the validator had an attestation included in the _previous_ epoch.
-    pub is_previous_epoch_attester: bool,
     /// True if the validator's beacon block root attestation for the first slot of the _previous_
     /// epoch matches the block root known to the state.
     pub is_previous_epoch_target_attester: bool,
@@ -306,7 +304,9 @@ pub struct Eth1Block {
     pub hash: Hash256,
     pub timestamp: u64,
     pub number: u64,
+    #[ssz(with = "four_byte_option_hash256")]
     pub deposit_root: Option<Hash256>,
+    #[ssz(with = "four_byte_option_u64")]
     pub deposit_count: Option<u64>,
 }
 
@@ -318,6 +318,13 @@ impl Eth1Block {
             block_hash: self.hash,
         })
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DatabaseInfo {
+    pub schema_version: u64,
+    pub split: Split,
+    pub anchor: Option<AnchorInfo>,
 }
 
 impl BeaconNodeHttpClient {
@@ -470,6 +477,7 @@ impl BeaconNodeHttpClient {
     pub async fn get_lighthouse_beacon_states_ssz<E: EthSpec>(
         &self,
         state_id: &StateId,
+        spec: &ChainSpec,
     ) -> Result<Option<BeaconState<E>>, Error> {
         let mut path = self.server.full.clone();
 
@@ -483,7 +491,7 @@ impl BeaconNodeHttpClient {
 
         self.get_bytes_opt(path)
             .await?
-            .map(|bytes| BeaconState::from_ssz_bytes(&bytes).map_err(Error::InvalidSsz))
+            .map(|bytes| BeaconState::from_ssz_bytes(&bytes, spec).map_err(Error::InvalidSsz))
             .transpose()
     }
 
@@ -497,5 +505,31 @@ impl BeaconNodeHttpClient {
             .push("staking");
 
         self.get_opt::<(), _>(path).await.map(|opt| opt.is_some())
+    }
+
+    /// `GET lighthouse/database/info`
+    pub async fn get_lighthouse_database_info(&self) -> Result<DatabaseInfo, Error> {
+        let mut path = self.server.full.clone();
+
+        path.path_segments_mut()
+            .map_err(|()| Error::InvalidUrl(self.server.clone()))?
+            .push("lighthouse")
+            .push("database")
+            .push("info");
+
+        self.get(path).await
+    }
+
+    /// `POST lighthouse/database/reconstruct`
+    pub async fn post_lighthouse_database_reconstruct(&self) -> Result<String, Error> {
+        let mut path = self.server.full.clone();
+
+        path.path_segments_mut()
+            .map_err(|()| Error::InvalidUrl(self.server.clone()))?
+            .push("lighthouse")
+            .push("database")
+            .push("reconstruct");
+
+        self.post_with_response(path, &()).await
     }
 }

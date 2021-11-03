@@ -13,7 +13,6 @@ use deposit_contract::{
 use ganache::GanacheInstance;
 use std::time::Duration;
 use tokio::time::sleep;
-use tokio_compat_02::FutureExt;
 use types::DepositData;
 use types::{test_utils::generate_deterministic_keypair, EthSpec, Hash256, Keypair, Signature};
 use web3::contract::{Contract, Options};
@@ -182,7 +181,6 @@ impl DepositContract {
             .web3
             .eth()
             .accounts()
-            .compat()
             .await
             .map_err(|e| format!("Failed to get accounts: {:?}", e))
             .and_then(|accounts| {
@@ -206,12 +204,13 @@ impl DepositContract {
             data: encode_eth1_tx_data(&deposit_data).map(Into::into).ok(),
             nonce: None,
             condition: None,
+            transaction_type: None,
+            access_list: None,
         };
 
         self.web3
             .eth()
             .send_transaction(tx_request)
-            .compat()
             .await
             .map_err(|e| format!("Failed to call deposit fn: {:?}", e))?;
         Ok(())
@@ -255,7 +254,6 @@ async fn deploy_deposit_contract(
     let from_address = web3
         .eth()
         .accounts()
-        .compat()
         .await
         .map_err(|e| format!("Failed to get accounts: {:?}", e))
         .and_then(|accounts| {
@@ -269,7 +267,6 @@ async fn deploy_deposit_contract(
         let result = web3
             .personal()
             .unlock_account(from_address, &password, None)
-            .compat()
             .await;
         match result {
             Ok(true) => return Ok(from_address),
@@ -290,7 +287,6 @@ async fn deploy_deposit_contract(
         .execute(bytecode, (), deploy_address);
 
     pending_contract
-        .compat()
         .await
         .map(|contract| contract.address())
         .map_err(|e| format!("Unable to resolve pending contract: {:?}", e))

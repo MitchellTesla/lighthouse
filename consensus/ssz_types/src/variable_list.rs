@@ -259,8 +259,10 @@ where
 }
 
 #[cfg(feature = "arbitrary")]
-impl<T: arbitrary::Arbitrary, N: 'static + Unsigned> arbitrary::Arbitrary for VariableList<T, N> {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+impl<'a, T: arbitrary::Arbitrary<'a>, N: 'static + Unsigned> arbitrary::Arbitrary<'a>
+    for VariableList<T, N>
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let max_size = N::to_usize();
         let rand = usize::arbitrary(u)?;
         let size = std::cmp::min(rand, max_size);
@@ -345,7 +347,7 @@ mod test {
     fn round_trip<T: Encode + Decode + std::fmt::Debug + PartialEq>(item: T) {
         let encoded = &item.as_ssz_bytes();
         assert_eq!(item.ssz_bytes_len(), encoded.len());
-        assert_eq!(T::from_ssz_bytes(&encoded), Ok(item));
+        assert_eq!(T::from_ssz_bytes(encoded), Ok(item));
     }
 
     #[test]

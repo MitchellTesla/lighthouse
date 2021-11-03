@@ -4,6 +4,7 @@ use client::{ClientConfig, ClientGenesis};
 use directory::{DEFAULT_BEACON_NODE_DIR, DEFAULT_NETWORK_DIR, DEFAULT_ROOT_DIR};
 use eth2_libp2p::{multiaddr::Protocol, Enr, Multiaddr, NetworkConfig, PeerIdSerialized};
 use eth2_network_config::{Eth2NetworkConfig, DEFAULT_HARDCODED_NETWORK};
+use http_api::TlsConfig;
 use sensitive_url::SensitiveUrl;
 use slog::{info, warn, Logger};
 use std::cmp;
@@ -105,6 +106,25 @@ pub fn get_config<E: EthSpec>(
             .map_err(|_| "Invalid allow-origin value")?;
 
         client_config.http_api.allow_origin = Some(allow_origin.to_string());
+    }
+
+    if cli_args.is_present("http-disable-legacy-spec") {
+        client_config.http_api.serve_legacy_spec = false;
+    }
+
+    if cli_args.is_present("http-enable-tls") {
+        client_config.http_api.tls_config = Some(TlsConfig {
+            cert: cli_args
+                .value_of("http-tls-cert")
+                .ok_or("--http-tls-cert was not provided.")?
+                .parse::<PathBuf>()
+                .map_err(|_| "http-tls-cert is not a valid path name.")?,
+            key: cli_args
+                .value_of("http-tls-key")
+                .ok_or("--http-tls-key was not provided.")?
+                .parse::<PathBuf>()
+                .map_err(|_| "http-tls-key is not a valid path name.")?,
+        });
     }
 
     /*
@@ -260,7 +280,7 @@ pub fn get_config<E: EthSpec>(
     /*
      * Load the eth2 network dir to obtain some additional config values.
      */
-    let eth2_network_config = get_eth2_network_config(&cli_args)?;
+    let eth2_network_config = get_eth2_network_config(cli_args)?;
 
     client_config.eth1.deposit_contract_address = format!("{:?}", spec.deposit_contract_address);
     client_config.eth1.deposit_contract_deploy_block =
@@ -288,15 +308,62 @@ pub fn get_config<E: EthSpec>(
         }
     }
 
-    if let Some(genesis_state_bytes) = eth2_network_config.genesis_state_bytes {
-        // Note: re-serializing the genesis state is not so efficient, however it avoids adding
-        // trait bounds to the `ClientGenesis` enum. This would have significant flow-on
-        // effects.
-        client_config.genesis = ClientGenesis::SszBytes {
-            genesis_state_bytes,
-        };
+    client_config.genesis = if let Some(genesis_state_bytes) =
+        eth2_network_config.genesis_state_bytes
+    {
+        // Set up weak subjectivity sync, or start from the hardcoded genesis state.
+        if let (Some(initial_state_path), Some(initial_block_path)) = (
+            cli_args.value_of("checkpoint-state"),
+            cli_args.value_of("checkpoint-block"),
+        ) {
+            let read = |path: &str| {
+                use std::fs::File;
+                use std::io::Read;
+                File::open(Path::new(path))
+                    .and_then(|mut f| {
+                        let mut buffer = vec![];
+                        f.read_to_end(&mut buffer)?;
+                        Ok(buffer)
+                    })
+                    .map_err(|e| format!("Unable to open {}: {:?}", path, e))
+            };
+
+            let anchor_state_bytes = read(initial_state_path)?;
+            let anchor_block_bytes = read(initial_block_path)?;
+
+            ClientGenesis::WeakSubjSszBytes {
+                genesis_state_bytes,
+                anchor_state_bytes,
+                anchor_block_bytes,
+            }
+        } else if let Some(remote_bn_url) = cli_args.value_of("checkpoint-sync-url") {
+            let url = SensitiveUrl::parse(remote_bn_url)
+                .map_err(|e| format!("Invalid checkpoint sync URL: {:?}", e))?;
+
+            ClientGenesis::CheckpointSyncUrl {
+                genesis_state_bytes,
+                url,
+            }
+        } else {
+            // Note: re-serializing the genesis state is not so efficient, however it avoids adding
+            // trait bounds to the `ClientGenesis` enum. This would have significant flow-on
+            // effects.
+            ClientGenesis::SszBytes {
+                genesis_state_bytes,
+            }
+        }
     } else {
-        client_config.genesis = ClientGenesis::DepositContract;
+        if cli_args.is_present("checkpoint-state") || cli_args.is_present("checkpoint-sync-url") {
+            return Err(
+                "Checkpoint sync is not available for this network as no genesis state is known"
+                    .to_string(),
+            );
+        }
+        ClientGenesis::DepositContract
+    };
+
+    if cli_args.is_present("reconstruct-historic-states") {
+        client_config.chain.reconstruct_historic_states = true;
     }
 
     let raw_graffiti = if let Some(graffiti) = cli_args.value_of("graffiti") {
@@ -463,6 +530,10 @@ pub fn set_network_config(
         config.import_all_attestations = true;
     }
 
+    if cli_args.is_present("shutdown-after-sync") {
+        config.shutdown_after_sync = true;
+    }
+
     if let Some(listen_address_str) = cli_args.value_of("listen-address") {
         let listen_address = listen_address_str
             .parse()
@@ -606,6 +677,11 @@ pub fn set_network_config(
 
     if cli_args.is_present("disable-enr-auto-update") {
         config.discv5_config.enr_update = false;
+    }
+
+    if cli_args.is_present("disable-packet-filter") {
+        warn!(log, "Discv5 packet filter is disabled");
+        config.discv5_config.enable_packet_filter = false;
     }
 
     if cli_args.is_present("disable-discovery") {

@@ -180,7 +180,7 @@ impl<'a> Builder<'a> {
                     signature: Signature::empty().into(),
                 };
 
-                deposit_data.signature = deposit_data.create_signature(&voting_keypair.sk, &spec);
+                deposit_data.signature = deposit_data.create_signature(&voting_keypair.sk, spec);
 
                 let deposit_data =
                     encode_eth1_tx_data(&deposit_data).map_err(Error::UnableToEncodeDeposit)?;
@@ -231,7 +231,7 @@ impl<'a> Builder<'a> {
                 if self.store_withdrawal_keystore {
                     // Write the withdrawal password to file.
                     write_password_to_file(
-                        password_dir.join(withdrawal_keypair.pk.to_hex_string()),
+                        password_dir.join(withdrawal_keypair.pk.as_hex_string()),
                         withdrawal_password.as_bytes(),
                     )?;
 
@@ -294,6 +294,7 @@ fn random_keystore() -> Result<(Keystore, PlainText), Error> {
     let password: PlainText = rand::thread_rng()
         .sample_iter(&Alphanumeric)
         .take(DEFAULT_PASSWORD_LEN)
+        .map(char::from)
         .collect::<String>()
         .into_bytes()
         .into();
